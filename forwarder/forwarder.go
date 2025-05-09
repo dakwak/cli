@@ -2,6 +2,7 @@ package forwarder
 
 import (
 	"bytes"
+  "strings"
 	"crypto/sha256"
 	"encoding/json"
 	"io"
@@ -23,43 +24,52 @@ type TunnelResponse struct {
 	Headers map[string]string `json:"headers,omitempty"`
 	Body    string            `json:"body"`
 }
+
 func HandleConnection(wsConn *websocket.Conn, endpoint string) {
 	log.Printf("Listening for HTTP relay requests to %s", endpoint)
 
 	var mu sync.Mutex
 	var closed bool
 
-  safeWrite := func(data []byte) {
-  	mu.Lock()
-  	defer mu.Unlock()
-  
-  	if closed {
-  		log.Println("Skipping write, connection already closed")
-  		return
-  	}
-  
-  	writer, err := wsConn.NextWriter(websocket.TextMessage)
-  	if err != nil {
-  		log.Printf("safe write error (NextWriter): %v", err)
-  		closed = true
-  		return
-  	}
-  
-  	_, copyErr := io.Copy(writer, bytes.NewReader(data))
-  	closeErr := writer.Close()
-  
-  	if copyErr != nil {
-  		log.Printf("safe write error (copy): %v", copyErr)
-  		closed = true
-  	}
-  	if closeErr != nil {
-  		log.Printf("safe write error (close): %v", closeErr)
-  		closed = true
-  	}
-  }
+	wsConn.SetCloseHandler(func(code int, text string) error {
+		log.Printf("WebSocket closed by server: %d - %s", code, text)
+		mu.Lock()
+		closed = true
+		mu.Unlock()
+		return nil
+	})
 
+	safeWrite := func(data []byte) {
+		mu.Lock()
+		defer mu.Unlock()
+
+		if closed {
+			log.Println("Skipping write, connection already closed")
+			return
+		}
+
+		if !json.Valid(data) {
+			log.Println("Skipping invalid JSON write")
+			closed = true
+			return
+		}
+
+		if err := wsConn.WriteMessage(websocket.TextMessage, data); err != nil {
+			log.Printf("safe write error: %v", err)
+			closed = true
+			return
+		}
+	}
 
 	for {
+		mu.Lock()
+		if closed {
+			log.Println("Connection previously closed, exiting handler loop")
+			mu.Unlock()
+			break
+		}
+		mu.Unlock()
+
 		mt, r, err := wsConn.NextReader()
 		if err != nil {
 			log.Printf("Forwarder WebSocket read error: %v", err)
@@ -86,6 +96,7 @@ func HandleConnection(wsConn *websocket.Conn, endpoint string) {
 		httpReq, err := http.NewRequest(req.Method, fullURL, bytes.NewBufferString(req.Body))
 		if err != nil {
 			log.Printf("Failed to create HTTP request: %v", err)
+			safeWrite([]byte(`{"status":500,"body":"Failed to create request"}`))
 			continue
 		}
 		for k, v := range req.Headers {
@@ -114,8 +125,15 @@ func HandleConnection(wsConn *websocket.Conn, endpoint string) {
 			Body:    string(bodyBytes),
 		}
 
-		jsonResp, _ := json.Marshal(response)
-		log.Printf("Client sending response JSON (len=%d): SHA256=%x", len(jsonResp), sha256.Sum256(jsonResp))
+		jsonResp, err := json.Marshal(response)
+		if err != nil {
+			log.Printf("JSON marshal error: %v", err)
+			safeWrite([]byte(`{"status":500,"body":"Tunnel marshal error"}`))
+			continue
+		}
+
+		log.Printf("Response for [%s %s] → %d, size: %d bytes", req.Method, req.Path, response.Status, len(jsonResp))
+		log.Printf("Client sending response JSON: SHA256=%x", sha256.Sum256(jsonResp))
 		safeWrite(jsonResp)
 	}
 }
