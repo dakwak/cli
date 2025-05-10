@@ -1,6 +1,7 @@
 package client
 
 import (
+	"encoding/json"
 	"fmt"
 	"log"
 	"net/url"
@@ -12,7 +13,7 @@ import (
 
 var writeMu sync.Mutex
 
-func ConnectTunnel(tunnelHost, token, apikey, host string) (*websocket.Conn, error) {
+func ConnectTunnel(tunnelHost, token, apikey, host string) (*websocket.Conn, string, error) {
 	if tunnelHost == "" {
 		tunnelHost = os.Getenv("DAKWAK_TUNNEL_HOST")
 		if tunnelHost == "" {
@@ -39,21 +40,36 @@ func ConnectTunnel(tunnelHost, token, apikey, host string) (*websocket.Conn, err
 
 	log.Printf("Dialing tunnel: %s", u.String())
 
-	dialer := websocket.Dialer{
-		EnableCompression: false,
-	}
-
-	conn, _, err := dialer.Dial(u.String(), nil)
+	conn, _, err := websocket.DefaultDialer.Dial(u.String(), nil)
 	if err != nil {
-		return nil, fmt.Errorf("failed to connect to tunnel: %w", err)
+		return nil, "", fmt.Errorf("failed to connect to tunnel: %w", err)
 	}
 	conn.SetReadLimit(5 * 1024 * 1024)
 
+	// Read the initial client_id JSON
+	_, msg, err := conn.ReadMessage()
+	if err != nil {
+		conn.Close()
+		return nil, "", fmt.Errorf("failed to read client_id from server: %w", err)
+	}
+
+	var init struct {
+		ClientID string `json:"client_id"`
+	}
+	if err := json.Unmarshal(msg, &init); err != nil {
+		conn.Close()
+		return nil, "", fmt.Errorf("invalid client_id message: %w", err)
+	}
+
+	if init.ClientID == "" {
+		conn.Close()
+		return nil, "", fmt.Errorf("client_id missing in tunnel response")
+	}
+
 	log.Println("Tunnel connection established")
-	return conn, nil
+	return conn, init.ClientID, nil
 }
 
-// SafeWrite writes data to WebSocket safely (mutex locked)
 func SafeWrite(conn *websocket.Conn, data []byte) error {
 	writeMu.Lock()
 	defer writeMu.Unlock()

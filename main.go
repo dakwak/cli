@@ -50,8 +50,12 @@ func main() {
 	log.Printf("Connecting to tunnel (%s) for local service %s", *tunnelHost, localTarget)
 
 	// Establish tunnel
-	wsConn, err := client.ConnectTunnel(*tunnelHost, *token, *apikey, localTarget)
-  wsConn.SetReadLimit(5 * 1024 * 1024)
+	wsConn, clientID, err := client.ConnectTunnel(*tunnelHost, *token, *apikey, localTarget)
+        if err != nil {
+        	log.Fatalf("Failed to connect to tunnel: %v", err)
+        }
+        fmt.Printf("Public URL: https://%s.tunnel.dakwak.com\n", clientID)
+        wsConn.SetReadLimit(5 * 1024 * 1024)
 	if err != nil {
 		log.Fatalf("Failed to connect to tunnel: %v", err)
 	}
