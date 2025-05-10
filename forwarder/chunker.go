@@ -14,6 +14,8 @@ type ChunkedMessage struct {
 	Payload     string `json:"payload"`
 }
 
+const MaxChunkSize = 5 * 1024 * 1024 // 5MB
+
 // SplitLargeResponse breaks down a JSON blob into multiple WebSocket-safe chunks.
 func SplitLargeResponse(clientID string, jsonData []byte) [][]byte {
 	var chunks [][]byte

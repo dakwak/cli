@@ -1,8 +1,6 @@
 package forwarder
 
 import (
-	"bytes"
-	"crypto/sha256"
 	"encoding/json"
 	"io"
 	"log"
@@ -20,13 +18,7 @@ type TunnelRequest struct {
 	Body    string            `json:"body,omitempty"`
 }
 
-type TunnelResponse struct {
-	Status  int               `json:"status"`
-	Headers map[string]string `json:"headers,omitempty"`
-	Body    string            `json:"body"`
-}
-
-const MaxChunkSize = 25 * 1024 * 1024 // 5MB
+const StreamChunkSize = 128 * 1024 // 128 KB
 
 func HandleConnection(wsConn *websocket.Conn, endpoint string) {
 	log.Printf("Listening for HTTP relay requests to %s", endpoint)
@@ -42,44 +34,17 @@ func HandleConnection(wsConn *websocket.Conn, endpoint string) {
 		return nil
 	})
 
-	safeWrite := func(data []byte) {
-		mu.Lock()
-		defer mu.Unlock()
-
-		if closed {
-			log.Println("Skipping write, connection already closed")
-			return
+	writeChunk := func(data []byte) error {
+		writer, err := wsConn.NextWriter(websocket.BinaryMessage)
+		if err != nil {
+			return err
 		}
-
-		if !json.Valid(data) {
-			log.Println("Skipping invalid JSON write")
-			closed = true
-			return
+		_, err = writer.Write(data)
+		if err != nil {
+			writer.Close()
+			return err
 		}
-
-		if len(data) > MaxChunkSize {
-			chunks := splitIntoChunks(data, MaxChunkSize)
-			for i, chunk := range chunks {
-				frame := map[string]interface{}{
-					"chunk": i,
-					"total": len(chunks),
-					"data":  chunk,
-				}
-				chunkJSON, _ := json.Marshal(frame)
-				if err := wsConn.WriteMessage(websocket.TextMessage, chunkJSON); err != nil {
-					log.Printf("safe write chunk error: %v", err)
-					closed = true
-					return
-				}
-			}
-			return
-		}
-
-		if err := wsConn.WriteMessage(websocket.TextMessage, data); err != nil {
-			log.Printf("safe write error: %v", err)
-			closed = true
-			return
-		}
+		return writer.Close()
 	}
 
 	for {
@@ -101,23 +66,17 @@ func HandleConnection(wsConn *websocket.Conn, endpoint string) {
 			continue
 		}
 
-		var buf bytes.Buffer
-		if _, err := io.Copy(&buf, r); err != nil {
-			log.Printf("Forwarder Error reading WebSocket message: %v", err)
-			break
-		}
-
 		var req TunnelRequest
-		if err := json.Unmarshal(buf.Bytes(), &req); err != nil {
+		if err := json.NewDecoder(r).Decode(&req); err != nil {
 			log.Printf("Forwarder Invalid tunnel JSON message: %v", err)
 			continue
 		}
 
 		fullURL := "http://" + endpoint + "/" + strings.TrimPrefix(req.Path, "/")
-		httpReq, err := http.NewRequest(req.Method, fullURL, bytes.NewBufferString(req.Body))
+		httpReq, err := http.NewRequest(req.Method, fullURL, strings.NewReader(req.Body))
 		if err != nil {
 			log.Printf("Failed to create HTTP request: %v", err)
-			safeWrite([]byte(`{"status":500,"body":"Failed to create request"}`))
+			writeChunk([]byte(`{"status":500,"body":"Failed to create request"}`))
 			continue
 		}
 		for k, v := range req.Headers {
@@ -127,12 +86,11 @@ func HandleConnection(wsConn *websocket.Conn, endpoint string) {
 		resp, err := http.DefaultClient.Do(httpReq)
 		if err != nil {
 			log.Printf("Local HTTP error: %v", err)
-			safeWrite([]byte(`{"status":502,"body":"Bad Gateway"}`))
+			writeChunk([]byte(`{"status":502,"body":"Bad Gateway"}`))
 			continue
 		}
 		defer resp.Body.Close()
 
-		bodyBytes, _ := io.ReadAll(resp.Body)
 		headers := make(map[string]string)
 		for k, v := range resp.Header {
 			if len(v) > 0 {
@@ -140,34 +98,52 @@ func HandleConnection(wsConn *websocket.Conn, endpoint string) {
 			}
 		}
 
-		response := TunnelResponse{
+		// Send metadata with Stream flag
+		respMeta := struct {
+			Status  int               `json:"status"`
+			Headers map[string]string `json:"headers"`
+			Stream  bool              `json:"stream"`
+		}{
 			Status:  resp.StatusCode,
 			Headers: headers,
-			Body:    string(bodyBytes),
+			Stream:  true,
 		}
 
-		jsonResp, err := json.Marshal(response)
+		metaBytes, err := json.Marshal(respMeta)
 		if err != nil {
 			log.Printf("JSON marshal error: %v", err)
-			safeWrite([]byte(`{"status":500,"body":"Tunnel marshal error"}`))
+			writeChunk([]byte(`{"status":500,"body":"Tunnel marshal error"}`))
 			continue
 		}
 
-		log.Printf("Response for [%s %s] → %d, size: %d bytes", req.Method, req.Path, response.Status, len(jsonResp))
-		log.Printf("Client sending response JSON: SHA256=%x", sha256.Sum256(jsonResp))
-		safeWrite(jsonResp)
-	}
-}
-
-func splitIntoChunks(data []byte, chunkSize int) [][]byte {
-	var chunks [][]byte
-	for i := 0; i < len(data); i += chunkSize {
-		end := i + chunkSize
-		if end > len(data) {
-			end = len(data)
+		if err := writeChunk(metaBytes); err != nil {
+			log.Printf("WebSocket write error (meta): %v", err)
+			continue
 		}
-		chunks = append(chunks, data[i:end])
+
+		// Stream body in chunks
+		buf := make([]byte, StreamChunkSize)
+		for {
+			n, err := resp.Body.Read(buf)
+			if n > 0 {
+				if err := writeChunk(buf[:n]); err != nil {
+					log.Printf("WebSocket write error (body): %v", err)
+					break
+				}
+			}
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				log.Printf("HTTP body read error: %v", err)
+				break
+			}
+		}
+
+		// Signal end of stream
+		_ = writeChunk([]byte("_#_END_#_"))
+
+		log.Printf("Response for [%s %s] → %d", req.Method, req.Path, resp.StatusCode)
 	}
-	return chunks
 }
 
