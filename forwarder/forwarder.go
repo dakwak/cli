@@ -2,13 +2,14 @@ package forwarder
 
 import (
 	"bytes"
-  "strings"
 	"crypto/sha256"
 	"encoding/json"
 	"io"
 	"log"
 	"net/http"
-        "sync"
+	"strings"
+	"sync"
+
 	"github.com/gorilla/websocket"
 )
 
@@ -24,6 +25,8 @@ type TunnelResponse struct {
 	Headers map[string]string `json:"headers,omitempty"`
 	Body    string            `json:"body"`
 }
+
+const MaxChunkSize = 25 * 1024 * 1024 // 5MB
 
 func HandleConnection(wsConn *websocket.Conn, endpoint string) {
 	log.Printf("Listening for HTTP relay requests to %s", endpoint)
@@ -51,6 +54,24 @@ func HandleConnection(wsConn *websocket.Conn, endpoint string) {
 		if !json.Valid(data) {
 			log.Println("Skipping invalid JSON write")
 			closed = true
+			return
+		}
+
+		if len(data) > MaxChunkSize {
+			chunks := splitIntoChunks(data, MaxChunkSize)
+			for i, chunk := range chunks {
+				frame := map[string]interface{}{
+					"chunk": i,
+					"total": len(chunks),
+					"data":  chunk,
+				}
+				chunkJSON, _ := json.Marshal(frame)
+				if err := wsConn.WriteMessage(websocket.TextMessage, chunkJSON); err != nil {
+					log.Printf("safe write chunk error: %v", err)
+					closed = true
+					return
+				}
+			}
 			return
 		}
 
@@ -136,5 +157,17 @@ func HandleConnection(wsConn *websocket.Conn, endpoint string) {
 		log.Printf("Client sending response JSON: SHA256=%x", sha256.Sum256(jsonResp))
 		safeWrite(jsonResp)
 	}
+}
+
+func splitIntoChunks(data []byte, chunkSize int) [][]byte {
+	var chunks [][]byte
+	for i := 0; i < len(data); i += chunkSize {
+		end := i + chunkSize
+		if end > len(data) {
+			end = len(data)
+		}
+		chunks = append(chunks, data[i:end])
+	}
+	return chunks
 }
 
