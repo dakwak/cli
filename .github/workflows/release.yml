@@ -49,9 +49,9 @@ jobs:
           cd dist
           ARCHIVE_NAME="dakwak-${{ matrix.goos }}-${{ matrix.goarch }}.${{ matrix.archive }}"
           if [ "${{ matrix.archive }}" == "zip" ]; then
-            zip "$ARCHIVE_NAME" dakwak-cli${{ matrix.ext }}
+            zip "$ARCHIVE_NAME" dakwak${{ matrix.ext }}
           else
-            tar -czf "$ARCHIVE_NAME" dakwak-cli${{ matrix.ext }}
+            tar -czf "$ARCHIVE_NAME" dakwak${{ matrix.ext }}
           fi
           echo "archive_name=$ARCHIVE_NAME" >> $GITHUB_OUTPUT
 
