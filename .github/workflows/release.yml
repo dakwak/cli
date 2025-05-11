@@ -41,7 +41,7 @@ jobs:
           GOARCH: ${{ matrix.goarch }}
         run: |
           mkdir -p dist
-          go build -o ../dist/dakwak${{ matrix.ext }} main.go
+          go build -o dist/dakwak${{ matrix.ext }} main.go
 
       - name: Archive binaries
         id: archive
