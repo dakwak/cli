@@ -55,7 +55,7 @@ func main() {
         	log.Fatalf("Failed to connect to tunnel: %v", err)
         }
         fmt.Printf("Public URL: https://%s.tunnel.dakwak.com\n", clientID)
-        wsConn.SetReadLimit(5 * 1024 * 1024)
+        wsConn.SetReadLimit(25 * 1024 * 1024)
 	if err != nil {
 		log.Fatalf("Failed to connect to tunnel: %v", err)
 	}

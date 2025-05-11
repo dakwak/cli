@@ -44,7 +44,7 @@ func ConnectTunnel(tunnelHost, token, apikey, host string) (*websocket.Conn, str
 	if err != nil {
 		return nil, "", fmt.Errorf("failed to connect to tunnel: %w", err)
 	}
-	conn.SetReadLimit(5 * 1024 * 1024)
+	conn.SetReadLimit(25 * 1024 * 1024)
 
 	// Read the initial client_id JSON
 	_, msg, err := conn.ReadMessage()
